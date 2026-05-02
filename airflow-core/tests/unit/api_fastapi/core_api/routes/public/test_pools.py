@@ -25,6 +25,7 @@ from airflow.models.pool import Pool
 from airflow.models.team import Team
 from airflow.utils.session import provide_session
 
+from tests_common.test_utils.asserts import assert_queries_count
 from tests_common.test_utils.config import conf_vars
 from tests_common.test_utils.db import clear_db_pools, clear_db_teams
 from tests_common.test_utils.logs import check_last_log
@@ -1132,6 +1133,35 @@ class TestBulkPools(TestPoolsEndpoint):
         assert updated_pool.slots == 50  # updated
         assert updated_pool.description is None  # unchanged
         assert updated_pool.include_deferred is True  # unchanged
+
+    def test_bulk_delete_does_not_re_query_each_pool(self, test_client, session):
+        # Regression guard for the N+1 fix in BulkPoolService.handle_bulk_delete:
+        # the expected query count is independent of the number of deleted pools.
+        # The 4 queries are: (1) team-mapping auth check, (2) audit-log commit,
+        # (3) batched SELECT in categorize_pools, (4) commit that flushes the DELETEs.
+        # A regression that re-queries each pool inside the loop would add one
+        # SELECT per pool on top of these.
+        pool_names = [f"perf_pool_{i}" for i in range(5)]
+        session.add_all(Pool(pool=name, slots=1, include_deferred=False) for name in pool_names)
+        session.commit()
+
+        request_body = {
+            "actions": [
+                {
+                    "action": "delete",
+                    "entities": pool_names,
+                    "action_on_non_existence": "fail",
+                }
+            ]
+        }
+
+        with assert_queries_count(4):
+            response = test_client.patch("/pools", json=request_body)
+
+        assert response.status_code == 200
+        assert sorted(response.json()["delete"]["success"]) == sorted(pool_names)
+        remaining = session.scalars(select(Pool).where(Pool.pool.in_(pool_names))).all()
+        assert remaining == []
 
     def test_should_respond_401(self, unauthenticated_test_client):
         response = unauthenticated_test_client.patch("/pools", json={})
