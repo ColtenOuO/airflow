@@ -370,7 +370,19 @@ class SchedulerJobRunner(BaseJobRunner, LoggingMixin):
         if log:
             self._log = log
 
-        self.scheduler_dag_bag = DBDagBag(load_op_links=False)
+        dag_bag_cache_size = conf.getint("scheduler", "dag_bag_cache_size", fallback=0)
+        dag_bag_cache_ttl = conf.getint("scheduler", "dag_bag_cache_ttl", fallback=0)
+        if dag_bag_cache_size < 0:
+            self.log.warning("[scheduler] dag_bag_cache_size must be >= 0, using unbounded dict")
+            dag_bag_cache_size = 0
+        if dag_bag_cache_ttl < 0:
+            self.log.warning("[scheduler] dag_bag_cache_ttl must be >= 0, disabling TTL")
+            dag_bag_cache_ttl = 0
+        self.scheduler_dag_bag = DBDagBag(
+            load_op_links=False,
+            cache_size=dag_bag_cache_size,
+            cache_ttl=dag_bag_cache_ttl or None,
+        )
 
         # Set of (dag_id, asset_name, asset_uri) tuples for trigger policies that
         # are permanently unreachable for the rollup window's cardinality — the

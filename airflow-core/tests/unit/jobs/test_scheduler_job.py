@@ -38,6 +38,7 @@ import pendulum
 import psutil
 import pytest
 import time_machine
+from cachetools import LRUCache, TTLCache
 from sqlalchemy import delete, func, inspect, select, update
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import joinedload
@@ -423,6 +424,29 @@ class TestSchedulerJob:
             scheduler_job = Job()
             _ = SchedulerJobRunner(job=scheduler_job, executors=[self.null_exec])
             assert scheduler_job.heartrate == heartrate
+
+    @pytest.mark.parametrize(
+        ("cache_size", "cache_ttl", "expected_use_cache", "expected_dags_type"),
+        [
+            pytest.param(0, 0, False, dict, id="default_unbounded"),
+            pytest.param(10, 3600, True, TTLCache, id="bounded_with_ttl"),
+            pytest.param(10, 0, True, LRUCache, id="bounded_lru_only"),
+            pytest.param(-1, 0, False, dict, id="negative_size_falls_back_to_unbounded"),
+        ],
+    )
+    def test_scheduler_dag_bag_cache_config(
+        self, cache_size, cache_ttl, expected_use_cache, expected_dags_type
+    ):
+        with conf_vars(
+            {
+                ("scheduler", "dag_bag_cache_size"): str(cache_size),
+                ("scheduler", "dag_bag_cache_ttl"): str(cache_ttl),
+            }
+        ):
+            scheduler_job = Job()
+            job_runner = SchedulerJobRunner(job=scheduler_job, executors=[self.null_exec])
+            assert job_runner.scheduler_dag_bag._use_cache is expected_use_cache
+            assert isinstance(job_runner.scheduler_dag_bag._dags, expected_dags_type)
 
     def test_no_orphan_process_will_be_left(self):
         current_process = psutil.Process()

@@ -2642,6 +2642,28 @@ scheduler:
       type: integer
       example: ~
       default: "60"
+    dag_bag_cache_size:
+      description: |
+        Size of the LRU cache for SerializedDAG objects the scheduler keeps for the lifetime of the
+        process. Set to 0 to use an unbounded dict (no eviction, the historical behavior). Every Dag
+        version the scheduler ever loads is cached by Dag version ID and, with an unbounded dict, is
+        never released -- on an installation where Dag content changes frequently (frequent
+        redeploys, or Dags whose serialized content varies between parses) this grows without bound
+        for the life of the scheduler process. Set a positive value to bound it.
+      version_added: 3.4.0
+      type: integer
+      example: ~
+      default: "0"
+    dag_bag_cache_ttl:
+      description: |
+        Time-to-live (seconds) for cached SerializedDAG objects in the scheduler. Only takes effect
+        when ``dag_bag_cache_size`` is set to a positive value. After this time, cached DAGs will be
+        re-fetched from the database on next access. Set to 0 to disable TTL (cache entries will only
+        be evicted by LRU policy).
+      version_added: 3.4.0
+      type: integer
+      example: ~
+      default: "0"
     pool_metrics_interval:
       description: |
         How often (in seconds) should pool usage stats be sent to StatsD (if statsd_on is enabled)
