@@ -49,9 +49,16 @@ def sample_response():
     return ModelResponse(parts=[TextPart(content="Hello!")])
 
 
+def _write_raw_entry(storage: DurableStorage, key: str, value) -> None:
+    """Write directly to an entry's file, bypassing the public save methods."""
+    path = storage._get_entry_path(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value))
+
+
 class TestDurableStorageInit:
     def test_cache_id_is_deterministic(self):
-        """The same task identity always maps to the same cache file (so retries resume)."""
+        """The same task identity always maps to the same cache directory (so retries resume)."""
         a = DurableStorage(dag_id="d", task_id="t", run_id="r", map_index=-1)
         b = DurableStorage(dag_id="d", task_id="t", run_id="r", map_index=-1)
         assert a._cache_id == b._cache_id
@@ -63,7 +70,7 @@ class TestDurableStorageInit:
 
     def test_cache_id_no_collision_across_tasks(self):
         """Distinct (dag, task) pairs that concatenate to the same string must not
-        share a cache file -- e.g. dag ``etl`` + task ``load_data`` vs dag
+        share a cache directory -- e.g. dag ``etl`` + task ``load_data`` vs dag
         ``etl_load`` + task ``data``. A plain ``_``-join aliased them, letting one
         task read, overwrite, or delete another task's durable cache."""
         a = DurableStorage(dag_id="etl", task_id="load_data", run_id="r")
@@ -75,8 +82,6 @@ class TestSaveLoadModelResponse:
     def test_save_and_load_roundtrips(self, storage, sample_response):
         storage.save_model_response("model_step_0", sample_response, fingerprint="fp_abc")
 
-        # Reset in-memory cache to force read from file
-        storage._cache = None
         loaded, fingerprint = storage.load_model_response("model_step_0")
 
         assert loaded is not None
@@ -101,7 +106,6 @@ class TestSaveLoadModelResponse:
         before = ModelMessagesTypeAdapter.dump_python([resp], mode="json")
 
         storage.save_model_response("model_step_0", resp, fingerprint="fp")
-        storage._cache = None
         loaded, _ = storage.load_model_response("model_step_0")
 
         after = ModelMessagesTypeAdapter.dump_python([loaded], mode="json")
@@ -109,11 +113,10 @@ class TestSaveLoadModelResponse:
 
     def test_stored_entry_is_single_encoded(self, storage, sample_response):
         """The response payload is stored as native JSON objects, not a nested
-        JSON string -- the whole cache is encoded exactly once by ``_save_cache``."""
+        JSON string -- each entry file is encoded exactly once by ``_write_entry``."""
         storage.save_model_response("model_step_0", sample_response, fingerprint="fp")
 
-        on_disk = json.loads(storage._get_path().read_text())
-        entry = on_disk["model_step_0"]
+        entry = json.loads(storage._get_entry_path("model_step_0").read_text())
 
         assert isinstance(entry, dict)  # not a re-encoded JSON string
         assert isinstance(entry["data"], list)  # not a nested JSON string
@@ -121,10 +124,9 @@ class TestSaveLoadModelResponse:
 
     def test_legacy_entry_without_fingerprint_loads(self, storage, sample_response):
         """Entries written before fingerprinting (raw adapter JSON) load with a None fingerprint."""
-        cache = storage._load_cache()
-        cache["model_step_0"] = ModelMessagesTypeAdapter.dump_json([sample_response]).decode()
-        storage._save_cache()
-        storage._cache = None
+        _write_raw_entry(
+            storage, "model_step_0", ModelMessagesTypeAdapter.dump_json([sample_response]).decode()
+        )
 
         loaded, fingerprint = storage.load_model_response("model_step_0")
 
@@ -137,7 +139,6 @@ class TestSaveLoadToolResult:
     def test_save_and_load_roundtrips(self, storage):
         storage.save_tool_result("tool_step_0", {"rows": [1, 2, 3]}, fingerprint="fp")
 
-        storage._cache = None
         found, value, fingerprint = storage.load_tool_result("tool_step_0")
 
         assert found is True
@@ -146,7 +147,6 @@ class TestSaveLoadToolResult:
     def test_fingerprint_roundtrips(self, storage):
         storage.save_tool_result("tool_step_0", "result", fingerprint="fp_tool")
 
-        storage._cache = None
         found, value, fingerprint = storage.load_tool_result("tool_step_0")
 
         assert found is True
@@ -154,10 +154,7 @@ class TestSaveLoadToolResult:
 
     def test_legacy_entry_without_fingerprint_loads(self, storage):
         """Entries written before fingerprinting load with a None fingerprint."""
-        cache = storage._load_cache()
-        cache["tool_step_0"] = json.dumps({"__durable_cached__": True, "value": "old"})
-        storage._save_cache()
-        storage._cache = None
+        _write_raw_entry(storage, "tool_step_0", json.dumps({"__durable_cached__": True, "value": "old"}))
 
         found, value, fingerprint = storage.load_tool_result("tool_step_0")
 
@@ -174,7 +171,6 @@ class TestSaveLoadToolResult:
     def test_none_result_roundtrips(self, storage):
         storage.save_tool_result("tool_step_0", None, fingerprint="fp")
 
-        storage._cache = None
         found, value, fingerprint = storage.load_tool_result("tool_step_0")
 
         assert found is True
@@ -195,57 +191,73 @@ class TestSaveLoadToolResult:
 class TestMalformedEntries:
     def test_empty_data_list_degrades_to_miss(self, storage):
         """A torn entry whose data list is empty loads as a miss, not an IndexError."""
-        cache = storage._load_cache()
-        cache["model_step_0"] = {"fingerprint": "fp", "data": []}
-        storage._save_cache()
-        storage._cache = None
+        _write_raw_entry(storage, "model_step_0", {"fingerprint": "fp", "data": []})
 
         assert storage.load_model_response("model_step_0") == (None, None)
 
     def test_entry_missing_data_key_degrades_to_miss(self, storage):
-        cache = storage._load_cache()
-        cache["model_step_0"] = {"fingerprint": "fp"}
-        storage._save_cache()
-        storage._cache = None
+        _write_raw_entry(storage, "model_step_0", {"fingerprint": "fp"})
 
         assert storage.load_model_response("model_step_0") == (None, None)
 
 
 class TestCleanup:
-    def test_cleanup_deletes_file(self, storage, sample_response):
+    def test_cleanup_deletes_entries(self, storage, sample_response):
         storage.save_model_response("model_step_0", sample_response, fingerprint="fp")
-        path = storage._get_path()
-        assert path.exists()
+        storage.save_tool_result("tool_step_1", "result", fingerprint="fp")
+        path_a = storage._get_entry_path("model_step_0")
+        path_b = storage._get_entry_path("tool_step_1")
+        assert path_a.exists()
+        assert path_b.exists()
 
         storage.cleanup()
-        assert not path.exists()
 
-    def test_cleanup_on_nonexistent_file(self, storage):
+        assert not path_a.exists()
+        assert not path_b.exists()
+        assert not storage._get_dir().exists()
+
+    def test_cleanup_on_nonexistent_directory(self, storage):
         storage.cleanup()  # Should not raise
 
 
-class TestInMemoryCaching:
-    def test_multiple_saves_write_single_file(self, storage, sample_response):
+class TestPerEntryFiles:
+    def test_multiple_saves_write_separate_files(self, storage, sample_response):
+        """Each key gets its own file -- saving a new step must not touch earlier
+        ones, unlike the old single-blob-rewrite-per-save design."""
         storage.save_model_response("model_step_0", sample_response, fingerprint="fp")
         storage.save_tool_result("tool_step_1", "result", fingerprint="fp")
         storage.save_model_response("model_step_2", sample_response, fingerprint="fp")
 
-        assert "model_step_0" in storage._cache
-        assert "tool_step_1" in storage._cache
-        assert "model_step_2" in storage._cache
+        files = {p.name for p in storage._get_dir().iterdir()}
+        assert files == {"model_step_0.json", "tool_step_1.json", "model_step_2.json"}
 
-    def test_cache_survives_reload(self, storage, sample_response):
-        """Simulate retry: save cache, reset in-memory, reload from file."""
+    def test_saving_a_new_entry_does_not_rewrite_earlier_entries(self, storage, sample_response):
         storage.save_model_response("model_step_0", sample_response, fingerprint="fp")
-        storage.save_tool_result("tool_step_1", "tool result", fingerprint="fp")
+        before = storage._get_entry_path("model_step_0").read_text()
 
-        # Simulate new DurableStorage instance (as on retry)
-        storage._cache = None
+        for i in range(1, 10):
+            storage.save_model_response(f"model_step_{i}", sample_response, fingerprint="fp")
 
-        loaded_response, _ = storage.load_model_response("model_step_0")
-        assert loaded_response is not None
-        assert loaded_response.parts[0].content == "Hello!"
+        after = storage._get_entry_path("model_step_0").read_text()
+        assert after == before
 
-        found, value, _ = storage.load_tool_result("tool_step_1")
-        assert found is True
-        assert value == "tool result"
+    def test_new_instance_can_load_entries_saved_by_a_previous_instance(
+        self, tmp_cache_path, sample_response
+    ):
+        """Simulates a retry: a fresh DurableStorage (as constructed on a new worker)
+        must be able to load entries a previous instance already persisted."""
+        with patch("airflow.providers.common.ai.durable.storage._get_base_path") as mock_base:
+            mock_base.return_value = ObjectStoragePath(tmp_cache_path)
+
+            first = DurableStorage(dag_id="d", task_id="t", run_id="r")
+            first.save_model_response("model_step_0", sample_response, fingerprint="fp")
+            first.save_tool_result("tool_step_1", "tool result", fingerprint="fp")
+
+            second = DurableStorage(dag_id="d", task_id="t", run_id="r")
+            loaded_response, _ = second.load_model_response("model_step_0")
+            assert loaded_response is not None
+            assert loaded_response.parts[0].content == "Hello!"
+
+            found, value, _ = second.load_tool_result("tool_step_1")
+            assert found is True
+            assert value == "tool result"
