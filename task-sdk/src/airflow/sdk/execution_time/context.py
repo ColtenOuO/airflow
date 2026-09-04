@@ -558,9 +558,10 @@ class TaskStateStoreAccessor:
     def __repr__(self) -> str:
         return f"<TaskStateStoreAccessor ti_id={self._ti_id}>"
 
-    # TODO: ``__getattr__`` for jinja template access like ``{{ task_store.job_id }}``
-    # is not implemented yet cos it's unclear whether task state values will be
-    # used in templates.
+    def __getattr__(self, key: str) -> JsonValue:
+        if key.startswith("_"):
+            raise AttributeError(key)
+        return self.get(key)
 
     def get(self, key: str, default: JsonValue = None) -> JsonValue:
         """

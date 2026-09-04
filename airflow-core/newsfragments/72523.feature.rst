@@ -1,0 +1,1 @@
+Task state store values can now be accessed via dot notation in templates, e.g. ``{{ task_state_store.job_id }}``, in addition to ``task_state_store.get("job_id")``.

@@ -1427,6 +1427,29 @@ class TestTaskStateStoreAccessor:
         with pytest.raises(AirflowRuntimeError):
             TaskStateStoreAccessor(ti_id=self.TI_ID, scope=self.SCOPE).get("some_key")
 
+    def test_getattr_returns_value(self, mock_supervisor_comms):
+        mock_supervisor_comms.send.return_value = TaskStateStoreResult(value="app_001")
+
+        result = TaskStateStoreAccessor(ti_id=self.TI_ID, scope=self.SCOPE).job_id
+
+        assert result == "app_001"
+        mock_supervisor_comms.send.assert_called_once_with(GetTaskStateStore(ti_id=self.TI_ID, key="job_id"))
+
+    def test_getattr_returns_none_when_key_missing(self, mock_supervisor_comms):
+        mock_supervisor_comms.send.return_value = ErrorResponse(
+            error=ErrorType.TASK_STORE_NOT_FOUND, detail={"key": "missing_key"}
+        )
+
+        result = TaskStateStoreAccessor(ti_id=self.TI_ID, scope=self.SCOPE).missing_key
+
+        assert result is None
+
+    def test_getattr_raises_attribute_error_for_internal_names(self, mock_supervisor_comms):
+        with pytest.raises(AttributeError):
+            TaskStateStoreAccessor(ti_id=self.TI_ID, scope=self.SCOPE)._not_a_stored_key
+
+        mock_supervisor_comms.send.assert_not_called()
+
     def test_set_none_raises(self, mock_supervisor_comms):
         with pytest.raises(ValueError, match="Cannot set value as None"):
             TaskStateStoreAccessor(ti_id=self.TI_ID, scope=self.SCOPE).set("job_id", None)
