@@ -187,7 +187,8 @@ class TestDataFusionToolsetQuery:
     def test_truncates_at_max_rows(self):
         cfg = _make_mock_datasource_config()
         ts = DataFusionToolset([cfg], max_rows=1)
-        ts._engine = _make_mock_engine(query_result={"id": [1, 2, 3], "name": ["a", "b", "c"]})
+        engine = _make_mock_engine(query_result={"id": [1, 2], "name": ["a", "b"]})
+        ts._engine = engine
 
         result = asyncio.run(
             ts.call_tool(
@@ -198,10 +199,11 @@ class TestDataFusionToolsetQuery:
             )
         )
         data = json.loads(result)
+        engine.execute_query.assert_called_once_with("SELECT id, name FROM sales_data", max_rows=2)
         assert data["rows"] == [[1, "a"]]
         assert data["truncated"] is True
         assert data["truncated_by"] == "max_rows"
-        assert data["total_rows"] == 3
+        assert "total_rows" not in data
 
     def test_handles_empty_result(self):
         cfg = _make_mock_datasource_config()
