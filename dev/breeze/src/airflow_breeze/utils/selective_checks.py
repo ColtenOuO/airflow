@@ -38,6 +38,8 @@ from airflow_breeze.global_constants import (
     CI_AMD_PLATFORM,
     CI_ARM_PLATFORM,
     COMMITTERS,
+    CORE_TEST_TYPE_COMPANIONS,
+    CORE_TEST_TYPE_ESTIMATED_MINUTES,
     CURRENT_KUBERNETES_VERSIONS,
     CURRENT_MYSQL_VERSIONS,
     CURRENT_POSTGRES_VERSIONS,
@@ -865,6 +867,25 @@ def _split_list(input_list, n) -> list[list[str]]:
     ]
 
 
+def _split_list_by_weight(input_list: list[str], n: int, weights: dict[str, float]) -> list[list[str]]:
+    """
+    Split input_list into exactly n sub-lists whose total weights are as even as possible.
+
+    Items are assigned heaviest first to the currently lightest sub-list. Sub-lists are returned
+    lightest first, because CI gives extra work (migration tests) to the first one.
+
+    Example:
+        >>> _split_list_by_weight(["a", "b", "c", "d"], 2, {"a": 5, "b": 3, "c": 2, "d": 1})
+        [['b', 'c'], ['a', 'd']]
+    """
+    buckets: list[tuple[float, list[str]]] = [(0.0, []) for _ in range(n)]
+    for item in sorted(input_list, key=lambda item: (-weights.get(item, 1.0), item)):
+        index = min(range(n), key=lambda i: buckets[i][0])
+        total, items = buckets[index]
+        buckets[index] = (total + weights.get(item, 1.0), [*items, item])
+    return [sorted(items) for _, items in sorted(buckets, key=lambda bucket: bucket[0])]
+
+
 def _strip_test_side_effect_providers(test_type: str) -> str:
     """Drop the test side-effect providers so the description names the providers selected for the change."""
     if not test_type.startswith("Providers[") or test_type.startswith("Providers[-"):
@@ -1690,8 +1711,9 @@ class SelectiveChecks:
 
         candidate_test_types: set[str] = {"Always"}
         matched_files: set[str] = set()
+        companion_test_types = set(itertools.chain.from_iterable(CORE_TEST_TYPE_COMPANIONS.values()))
         for test_type in SelectiveCoreTestType:
-            if test_type not in [
+            if test_type.value not in companion_test_types and test_type not in [
                 SelectiveCoreTestType.ALWAYS,
                 SelectiveCoreTestType.CORE,
                 SelectiveCoreTestType.OTHER,
@@ -1746,6 +1768,10 @@ class SelectiveChecks:
         # run core tests if any changes in serialization files
         if SelectiveCoreTestType.SERIALIZATION.value in candidate_test_types:
             candidate_test_types.add(SelectiveCoreTestType.CORE.value)
+
+        for parent_test_type, companions in CORE_TEST_TYPE_COMPANIONS.items():
+            if parent_test_type in candidate_test_types:
+                candidate_test_types.update(companions)
 
         # sort according to predefined order
         sorted_candidate_test_types = sorted(candidate_test_types)
@@ -1879,7 +1905,9 @@ class SelectiveChecks:
         current_test_types = sorted(set(self._get_core_test_types_to_run()))
         if len(current_test_types) <= NUMBER_OF_CORE_SLICES:
             return json.dumps(_get_test_list_as_json([current_test_types]))
-        list_of_list_of_types = _split_list(current_test_types, NUMBER_OF_CORE_SLICES)
+        list_of_list_of_types = _split_list_by_weight(
+            current_test_types, NUMBER_OF_CORE_SLICES, CORE_TEST_TYPE_ESTIMATED_MINUTES
+        )
         return json.dumps(_get_test_list_as_json(list_of_list_of_types))
 
     @cached_property
