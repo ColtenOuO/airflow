@@ -957,7 +957,7 @@ def get_legacy_base_image(debian_version: str = ALLOWED_DEBIAN_VERSIONS[0]) -> s
     return f"debian:{debian_version}-slim"
 
 
-# Number of slices for low dep tests
+# Number of slices for low dep tests (CI timing experiment baseline)
 NUMBER_OF_LOW_DEP_SLICES = 5
 
 # Number of slices for core test types (splitting reduces memory per xdist collection)
